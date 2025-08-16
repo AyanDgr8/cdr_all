@@ -381,6 +381,17 @@ export async function fetchReport(report, tenant, params = {}) {
             
             // Handle nested subdisposition structure
             if (cdr.fonoUC.subdisposition) {
+              // Extract Sub-Disposition-1 (first level)
+              if (cdr.fonoUC.subdisposition.name) {
+                processedCdr.sub_disposition_1 = cdr.fonoUC.subdisposition.name;
+              }
+              
+              // Extract Sub-Disposition-2 (second level)
+              if (cdr.fonoUC.subdisposition.subdisposition && cdr.fonoUC.subdisposition.subdisposition.name) {
+                processedCdr.sub_disposition_2 = cdr.fonoUC.subdisposition.subdisposition.name;
+              }
+              
+              // Keep the original subdisposition for backward compatibility
               if (typeof cdr.fonoUC.subdisposition === 'string') {
                 processedCdr.subdisposition = cdr.fonoUC.subdisposition;
               } else if (cdr.fonoUC.subdisposition.name) {
@@ -744,6 +755,17 @@ export async function fetchReportSinglePage(report, tenant, params = {}, limit =
                 
                 // Handle nested subdisposition structure
                 if (cdr.fonoUC.subdisposition) {
+                  // Extract Sub-Disposition-1 (first level)
+                  if (cdr.fonoUC.subdisposition.name) {
+                    processedCdr.sub_disposition_1 = cdr.fonoUC.subdisposition.name;
+                  }
+                  
+                  // Extract Sub-Disposition-2 (second level)
+                  if (cdr.fonoUC.subdisposition.subdisposition && cdr.fonoUC.subdisposition.subdisposition.name) {
+                    processedCdr.sub_disposition_2 = cdr.fonoUC.subdisposition.subdisposition.name;
+                  }
+                  
+                  // Keep the original subdisposition for backward compatibility
                   if (typeof cdr.fonoUC.subdisposition === 'string') {
                     processedCdr.subdisposition = cdr.fonoUC.subdisposition;
                   } else if (cdr.fonoUC.subdisposition.name) {

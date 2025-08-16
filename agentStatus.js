@@ -1,6 +1,6 @@
 // agentStatus.js
-// Fetch Agents Status & Activity report for a tenant and output to
-// stdout (table) or write to a file (CSV or JSON).
+// Fetch Agents Status & Activity report for a tenant with pagination support.
+// Supports loading 500 records at a time with next/previous navigation.
 //
 // Usage examples:
 //   node -r dotenv/config agentStatus.js mc_int 2025-07-02T08:00:00Z 2025-07-02T12:00:00Z
@@ -38,23 +38,28 @@ function toCsv(records, delimiter = ',') {
 }
 
 /**
- * Fetch the report, automatically traversing pages until completion.
+ * Fetch agent status report with pagination support.
+ * Returns 500 records at a time with next token for pagination.
  * @param {string} acct                         – tenant / account id.
  * @param {object} opts                         – query options.
  * @param {number} opts.startDate               – unix ms start of range.
  * @param {number} opts.endDate                 – unix ms end of range.
  * @param {string} [opts.name]                  – filter by agent name.
  * @param {string} [opts.extension]             – filter by extension.
- * @returns {Promise<object[]>}                 – concatenated rows.
+ * @param {string} [opts.start_key]             – pagination token from previous request.
+ * @param {number} [opts.maxRows]               – max records to return (default 500).
+ * @returns {Promise<{rows: object[], next: string|null}>} – paginated result with next token.
  */
 export async function fetchAgentStatus(
   acct,
-  { startDate, endDate, name, extension } = {}
+  { startDate, endDate, name, extension, start_key, maxRows = 500 } = {}
 ) {
   // Use env-configurable endpoint; fall back to the common REST path.
   const url = `${process.env.BASE_URL}${process.env.AGENT_STATUS_ENDPOINT || '/api/v2/reports/callcenter/agents/stats'}`;
   const records = [];
-  let startKey;
+  let startKey = start_key;
+  let nextStartKey = null;
+  const limit = Math.min(maxRows, 500); // Cap at 500 per request
 
   retry: for (let attempt = 0, delay = 1_000; attempt < MAX_RETRIES; attempt++, delay *= 2) {
     try {
@@ -85,6 +90,9 @@ export async function fetchAgentStatus(
           httpsAgent
         });
 
+        // Always capture paging token; undefined → null to signal end of list
+        nextStartKey = data.next_start_key ?? null;
+
         let chunk;
         const ensureExt = r => ({
           extension: r.extension ?? r.ext ?? r.userId ?? r.user_id ?? r.id ?? '',
@@ -101,9 +109,26 @@ export async function fetchAgentStatus(
           console.error('Unexpected API payload; dumping full response:', JSON.stringify(data, null, 2));
           throw new Error('Unrecognised API response format');
         }
-        records.push(...chunk);
-        if (!data.next_start_key) break;
-        startKey = data.next_start_key; // continue to next page
+
+        const remaining = limit - records.length;
+
+        // Push at most `remaining` records so we never exceed requested limit
+        if (remaining > 0) {
+          records.push(...chunk.slice(0, remaining));
+        }
+
+        // Break early once we have some rows so caller can respond quickly
+        if (records.length > 0) {
+          break;
+        }
+
+        // If we still didn't accumulate anything and there is another page,
+        // continue looping; otherwise exit.
+        if (nextStartKey === null) {
+          break;
+        }
+
+        startKey = nextStartKey;
       }
       break retry; // success
     } catch (err) {
@@ -113,7 +138,28 @@ export async function fetchAgentStatus(
     }
   }
 
-  return records;
+  return { rows: records, next: nextStartKey };
+}
+
+/**
+ * Legacy function for backward compatibility - fetches all records.
+ * @param {string} acct                         – tenant / account id.
+ * @param {object} opts                         – query options.
+ * @returns {Promise<object[]>}                 – all records.
+ */
+export async function fetchAllAgentStatus(acct, opts = {}) {
+  const allRecords = [];
+  let startKey = null;
+
+  while (true) {
+    const result = await fetchAgentStatus(acct, { ...opts, start_key: startKey, maxRows: 500 });
+    allRecords.push(...result.rows);
+    
+    if (!result.next) break;
+    startKey = result.next;
+  }
+
+  return allRecords;
 }
 
 async function cli() {
@@ -130,7 +176,8 @@ async function cli() {
     process.exit(1);
   }
 
-  const data = await fetchAgentStatus(acct, { startDate, endDate });
+  // Use the legacy function for CLI to maintain backward compatibility
+  const data = await fetchAllAgentStatus(acct, { startDate, endDate });
 
   if (outputFile) {
     await fs.promises.mkdir(path.dirname(outputFile), { recursive: true });
