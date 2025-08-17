@@ -20,6 +20,7 @@ const RAW_COLUMNS = new Set([
   'caller_id_number',
   'caller_id_name',
   'callee_id_number',
+  'callee_id_name',
   'caller_id_lead_name',
   'callee_id_lead_number',
   'agent_ext',
@@ -28,6 +29,12 @@ const RAW_COLUMNS = new Set([
   'extension',
   'ext',
   'to'
+]);
+
+// Columns that are durations in seconds
+const DURATION_COLUMNS = new Set([
+  'wait_duration',
+  'talk_duration'
 ]);
 
 function show(el) { el.classList.remove('is-hidden'); }
@@ -278,14 +285,15 @@ function renderTable(data) {
       // Map API fields to display fields
       transformedRecord.s_no = index + 1; // S. No
       transformedRecord.type_direction = record.call_direction || 'Internal outbound'; // Type/Direction
-      transformedRecord.called_time = record.timestamp || record.channel_created_time; // Called Time
-      transformedRecord.queue_campaign_name = extractQueueName(record); // Queue/Campaign Name
+      transformedRecord.called_time = record.channel_created_time || ''; // Called Time
+      transformedRecord.queue_name = extractQueueName(record); // Queue Name
+      transformedRecord.campaign_name = extractCampaignName(record); // Campaign Name
       transformedRecord.caller_id_number = record.caller_id_number; // Caller ID Number
-      transformedRecord.caller_id_lead_name = record.caller_id_name; // Caller ID/Lead Name
+      transformedRecord.caller_id_name = record.caller_id_name; // Caller ID/Lead Name
       transformedRecord.answered_time = calculateAnsweredTime(record); // Answered Time
       transformedRecord.hangup_time = calculateHangupTime(record); // Hangup Time
-      transformedRecord.wait_duration = record.ringing_seconds; // Wait Duration
-      transformedRecord.talk_duration = record.billing_seconds; // Talk Duration
+      transformedRecord.wait_duration = Number(record.ringing_seconds) || 0; // Wait Duration
+      transformedRecord.talk_duration = Number(record.billing_seconds) || 0; // Talk Duration
       transformedRecord.agent_disposition = record.disposition; // Agent Disposition
       transformedRecord.sub_disposition_1 = extractSubDisposition1(record); // Sub-disposition 1
       transformedRecord.sub_disposition_2 = extractSubDisposition2(record); // Sub-disposition 2
@@ -294,15 +302,55 @@ function renderTable(data) {
       transformedRecord.campaign_type = extractCampaignType(record); // Campaign Type
       transformedRecord.agent_history = record.agent_history; // Agent History
       transformedRecord.queue_history = record.queue_history; // Queue History
-      transformedRecord.recording = record.recording; // Recording
+      transformedRecord.recording = extractRecording(record); // Recording
       transformedRecord.agent_name = extractAgentName(record); // Agent Name
       transformedRecord.extension = extractExtension(record); // Extension
       transformedRecord.country = extractCountryFromPhoneNumber(record.caller_id_number || record.callee_id_number); // Country
       transformedRecord.follow_up_notes = record.follow_up_notes || ''; // Follow-up Notes
+
+      // Calculate talked duration if not present
+      if (!transformedRecord.talk_duration && transformedRecord.hangup_time && transformedRecord.answered_time) {
+        transformedRecord.talk_duration = transformedRecord.hangup_time - transformedRecord.answered_time;
+      }
+
+      // Calculate wait/queue duration if not present
+      if (!transformedRecord.wait_duration && transformedRecord.called_time) {
+        if (transformedRecord.answered_time) {
+          transformedRecord.wait_duration = transformedRecord.answered_time - transformedRecord.called_time;
+        } else if (transformedRecord.hangup_time) {
+          transformedRecord.wait_duration = transformedRecord.hangup_time - transformedRecord.called_time;
+        }
+      }
     }
 
     return transformedRecord;
   });
+
+  // Filter and deduplicate for CDR reports
+  if (document.getElementById('reportType').value === 'cdrs') {
+    // Group by caller_id_number and callee_id_number combination to remove duplicates
+    const phoneGroups = new Map();
+    originalData.forEach(record => {
+      const callerKey = record.caller_id_number || '';
+      const calleeKey = record.callee_id_number || '';
+      const groupKey = `${callerKey}|${calleeKey}`;
+      
+      // Only keep the first occurrence of each combination
+      if (!phoneGroups.has(groupKey)) {
+        phoneGroups.set(groupKey, record);
+      }
+    });
+
+    // Convert back to array with only first occurrences
+    originalData = Array.from(phoneGroups.values());
+
+    // Re-index the filtered data
+    originalData = originalData.map((record, index) => ({
+      ...record,
+      s_no: index + 1,
+      row_index: index + 1
+    }));
+  }
 
   // Initialize filteredData to originalData
   filteredData = [...originalData];
@@ -312,15 +360,16 @@ function renderTable(data) {
   let cols;
   
   if (reportType === 'cdrs') {
-    // Define the specific CDR columns we want to display in order, with index first
-    const cdrColumns = [
+    cols = [
       's_no',
       'type_direction',
-      'call_id',
-      'queue_campaign_name',
+      'queue_name',
+      'campaign_name',
       'called_time',
       'caller_id_number',
-      'caller_id_lead_name',
+      'caller_id_name',
+      'callee_id_number',
+      'callee_id_name',
       'answered_time',
       'hangup_time',
       'wait_duration',
@@ -329,7 +378,6 @@ function renderTable(data) {
       'sub_disposition_1',
       'sub_disposition_2',
       'follow_up_notes',
-      'callee_id_lead_number',
       'status',
       'campaign_type',
       'agent_history',
@@ -337,11 +385,10 @@ function renderTable(data) {
       'recording',
       'agent_name',
       'extension',
-      'country'
+      'country',
+      'call_id'
     ];
-    cols = cdrColumns;
   } else {
-    // For other report types, show all columns with index first
     const originalCols = Object.keys(originalData[0] || {});
     cols = ['row_index', ...originalCols.filter(col => col !== 'row_index')];
   }
@@ -365,14 +412,18 @@ function renderTableData(cols, data) {
       displayName = 'S.No';
     } else if (c === 'type_direction') {
       displayName = 'Type/Direction';
-    } else if (c === 'queue_campaign_name') {
-      displayName = 'Queue/Campaign Name';
+    } else if (c === 'queue_name') {
+      displayName = 'Queue Name';
+    } else if (c === 'campaign_name') {
+      displayName = 'Campaign Name';
     } else if (c === 'caller_id_number') {
       displayName = 'Caller ID Number';
-    } else if (c === 'caller_id_lead_name') {
-      displayName = 'Caller ID/Lead Name';
-    } else if (c === 'callee_id_lead_number') {
-      displayName = 'Callee ID/Lead Number';
+    } else if (c === 'caller_id_name') {
+      displayName = 'Caller ID Name';
+    } else if (c === 'callee_id_number') {
+      displayName = 'Callee ID Number';
+    } else if (c === 'callee_id_name') {
+      displayName = 'Callee ID Name';
     } else if (c === 'sub_disposition_1') {
       displayName = 'Sub-disposition 1';
     } else if (c === 'sub_disposition_2') {
@@ -409,19 +460,29 @@ function renderTableData(cols, data) {
 
         if (typeof v === 'object') {
           v = JSON.stringify(v);
-        } else if (typeof v === 'number') {
-          if (v > 1_000_000_000) {
-            // Likely epoch timestamp (s or ms)
-            const ms = v > 10_000_000_000 ? v : v * 1000;
-            v = isoToLocal(new Date(ms).toISOString());
-          } else {
+        } else if (typeof v === 'number' && !RAW_COLUMNS.has(c)) {
+          if (DURATION_COLUMNS.has(c)) {
             // Treat as duration in seconds
             v = secondsToHMS(v);
+          } else if (v > 1_000_000_000) {
+            // Handle different timestamp formats
+            let ms;
+            if (v > 1_000_000_000_000_000) {
+              // Microseconds (e.g., 1755191389441998) - divide by 1000 to get milliseconds
+              ms = v / 1000;
+            } else if (v < 4102444800000) {
+              // Seconds - multiply by 1000 to get milliseconds
+              ms = v * 1000;
+            } else {
+              // Already in milliseconds
+              ms = v;
+            }
+            v = isoToLocal(new Date(ms).toISOString());
           }
         } else if (typeof v === 'string' && /^\d+(\.\d+)?$/.test(v)) {
           const num = Number(v);
           if (!Number.isNaN(num) && num > 1_000_000_000) {
-            const ms = v.length > 10 ? num : num * 1000;
+            const ms = num < 4102444800000 ? num * 1000 : num;
             v = isoToLocal(new Date(ms).toISOString());
           }
         } else if (typeof v === 'string' && /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/.test(v)) {
@@ -433,54 +494,23 @@ function renderTableData(cols, data) {
             const src = `/api/recordings/${v}?account=${encodeURIComponent(tenantAccount)}`;
             const metaUrl = `/api/recordings/${v}/meta?account=${encodeURIComponent(tenantAccount)}`;
             return `<td style="text-align:center">
-              <div class="recording-container" data-recording-id="${id}" data-tenant="${tenantAccount}">
-                <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${id}" style="max-width:200px; display:none"></audio>
-                <div class="recording-loading" style="display:none">
-                  <span class="icon is-small"><i class="fas fa-spinner fa-spin"></i></span>
-                  Loading...
-                </div>
-                <div class="recording-error" style="display:none; color:red; font-size:12px">
-                  Recording unavailable
-                  <br><button class="button is-small is-warning retry-recording-btn" data-recording-id="${id}" data-src="${src}">
-                    <span class="icon is-small"><i class="fas fa-redo"></i></span>
-                    <span>Retry</span>
-                  </button>
-                </div>
-                <button class="button is-small is-primary play-recording-btn" data-recording-id="${id}" data-src="${src}">
-                  <span class="icon is-small"><i class="fas fa-play"></i></span>
-                  <span>Play</span>
-                </button>
-                <br><span class="rec-dur" id="dur_${id}"></span>
-              </div>
+              <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${id}" style="max-width:200px"></audio>
+              <br><span class="rec-dur" id="dur_${id}"></span>
             </td>`;
           }
           return '<td></td>';
         }
-
-        if (c === 'recording') {
-          const recordingId = v.replace(/[^\w]/g, '');
-          const src = `/api/recordings/${v}?account=${encodeURIComponent(tenantAccount)}`;
-          const metaUrl = `/api/recordings/${v}/meta?account=${encodeURIComponent(tenantAccount)}`;
-          return `<td style="text-align:center">
-            <div class="recording-container" data-recording-id="${recordingId}">
-              <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${recordingId}" style="max-width:200px; display:none"></audio>
-              <div class="recording-loading" style="display:none">
-                <span class="icon is-small"><i class="fas fa-spinner fa-spin"></i></span>
-                Loading...
-              </div>
-              <div class="recording-error" style="display:none; color: red;">
-                <span class="icon is-small"><i class="fas fa-exclamation-triangle"></i></span>
-                <span class="error-message">Error loading</span>
-                <button class="button is-small is-text retry-btn" style="margin-left: 5px;">Retry</button>
-              </div>
-              <button class="button is-small is-primary play-btn">
-                <span class="icon is-small"><i class="fas fa-play"></i></span>
-                <span>Play</span>
-              </button>
-              <br><span class="rec-dur" id="dur_${recordingId}"></span>
-            </div>
-          </td>`;
+        
+        // Handle queue history column
+        if (c === 'queue_history') {
+          return `<td style="text-align: center;">${formatQueueHistory(row)}</td>`;
         }
+        
+        // Handle agent history column
+        if (c === 'agent_history') {
+          return `<td style="text-align: center;">${formatAgentHistory(row)}</td>`;
+        }
+        
         return `<td>${v}</td>`;
       }).join('') + '</tr>';
     }).join('')}</tbody>`;
@@ -498,7 +528,6 @@ function generateSearchFilters(columns, data) {
   // Define specific filters to create
   const specificFilters = [
     { key: 'type_direction', label: 'Type/Direction', type: 'select' },
-    { key: 'call_id', label: 'Call ID', type: 'text' },
     { key: 'agent_disposition', label: 'Agent Disposition', type: 'select' },
     { key: 'sub_disposition_1', label: 'Sub Disposition 1', type: 'select' },
     { key: 'sub_disposition_2', label: 'Sub Disposition 2', type: 'select' },
@@ -598,7 +627,7 @@ function applyFilters() {
   activeFilters = {};
   
   // Handle regular filters
-  const regularFilters = ['type_direction', 'call_id', 'agent_disposition', 'sub_disposition_1', 'sub_disposition_2', 'agent_ext', 'agent_name', 'campaign_type', 'follow_up_notes'];
+  const regularFilters = ['type_direction', 'agent_disposition', 'sub_disposition_1', 'sub_disposition_2', 'agent_ext', 'agent_name', 'campaign_type', 'follow_up_notes'];
   regularFilters.forEach(column => {
     const filterElement = document.getElementById(`filter_${column}`);
     if (filterElement && filterElement.value.trim()) {
@@ -640,8 +669,6 @@ function applyFilters() {
     let phoneFilterPassed = true;
     if (phoneSearchValue) {
       const phoneFields = [
-        String(row.callee_id_lead_number || '').toLowerCase(),
-        String(row.caller_id_lead_name || '').toLowerCase(),
         String(row.caller_id_number || '').toLowerCase(),
         String(row.callee_id_number || '').toLowerCase()
       ];
@@ -660,11 +687,13 @@ function applyFilters() {
     cols = [
       's_no',
       'type_direction',
-      'call_id',
-      'queue_campaign_name',
+      'queue_name',
+      'campaign_name',
       'called_time',
       'caller_id_number',
-      'caller_id_lead_name',
+      'caller_id_name',
+      'callee_id_number',
+      'callee_id_name',
       'answered_time',
       'hangup_time',
       'wait_duration',
@@ -673,7 +702,6 @@ function applyFilters() {
       'sub_disposition_1',
       'sub_disposition_2',
       'follow_up_notes',
-      'callee_id_lead_number',
       'status',
       'campaign_type',
       'agent_history',
@@ -681,7 +709,8 @@ function applyFilters() {
       'recording',
       'agent_name',
       'extension',
-      'country'
+      'country',
+      'call_id'
     ];
   } else {
     const originalCols = Object.keys(originalData[0] || {});
@@ -712,11 +741,13 @@ function clearAllFilters() {
     cols = [
       's_no',
       'type_direction',
-      'call_id',
-      'queue_campaign_name',
+      'queue_name',
+      'campaign_name',
       'called_time',
       'caller_id_number',
-      'caller_id_lead_name',
+      'caller_id_name',
+      'callee_id_number',
+      'callee_id_name',
       'answered_time',
       'hangup_time',
       'wait_duration',
@@ -725,7 +756,6 @@ function clearAllFilters() {
       'sub_disposition_1',
       'sub_disposition_2',
       'follow_up_notes',
-      'callee_id_lead_number',
       'status',
       'campaign_type',
       'agent_history',
@@ -733,7 +763,8 @@ function clearAllFilters() {
       'recording',
       'agent_name',
       'extension',
-      'country'
+      'country',
+      'call_id'
     ];
   } else {
     const originalCols = Object.keys(originalData[0] || {});
@@ -872,8 +903,11 @@ function extractSubDisposition2(record) {
 }
 
 function extractQueueName(record) {
-  // Extract queue name from fonoUC.cc_campaign.campaign.queue_name or custom fields
-  return record.fonoUC?.cc_campaign?.campaign?.queue_name || record.queue_name || '';
+  // Extract queue name from fonoUC.cc.queue_name or custom fields
+  return record.fonoUC?.cc?.queue_name || 
+         record.fonoUC?.cc_campaign?.campaign?.queue_name || 
+         record.queue_name || 
+         '';
 }
 
 function extractCampaignName(record) {
@@ -902,36 +936,16 @@ function calculateHangupTime(record) {
 }
 
 function mapStatus(record) {
-  // Map status from fonoUC or custom fields
-  return record.fonoUC?.status || record.status || '';
+  // Map status from fonoUC.cc_campaign.lead.lead_campaign.status or custom fields
+  return record.fonoUC?.cc_campaign?.lead?.lead_campaign?.status || 
+         record.fonoUC?.status || 
+         record.status || 
+         '';
 }
 
 function extractCampaignType(record) {
   // Extract campaign type from fonoUC.cc_campaign.campaign.type or custom fields
   return record.fonoUC?.cc_campaign?.campaign?.type || record.campaign_type || '';
-}
-
-function formatAgentHistory(record) {
-  // Get agent history from various possible locations
-  let history = record.fonoUC?.cc_outbound?.agent_history || 
-                      record.fonoUC?.agent_history || 
-                      record.agent_history || [];
-  
-  // If it's a string, try to parse it as JSON
-  if (typeof history === 'string') {
-    try {
-      history = JSON.parse(history);
-    } catch {
-      history = [];
-    }
-  }
-  
-  // Ensure it's an array
-  if (!Array.isArray(history)) {
-    history = [];
-  }
-  
-  return historyToHtml(history);
 }
 
 function formatQueueHistory(record) {
@@ -978,20 +992,38 @@ function formatQueueHistory(record) {
   return createEyeBtn(tableHtml);
 }
 
-function historyToHtml(history) {
-  if (!Array.isArray(history) || !history.length) return '';
+function formatAgentHistory(record) {
+  // Get agent history from various possible locations
+  let history = record.fonoUC?.cc_outbound?.agent_history || 
+                      record.fonoUC?.agent_history || 
+                      record.agent_history || [];
+  
+  // If it's a string, try to parse it as JSON
+  if (typeof history === 'string') {
+    try {
+      history = JSON.parse(history);
+    } catch {
+      history = [];
+    }
+  }
+  
+  // Ensure it's an array
+  if (!Array.isArray(history)) {
+    history = [];
+  }
+  
+  if (!history.length) return '';
 
   // Sort by called_time (oldest first)
   const sorted = [...history].sort((a, b) => {
-    const aTs = a.called_time ?? 0;
-    const bTs = b.called_time ?? 0;
+    const aTs = a.called_time || a.last_attempt || 0;
+    const bTs = b.called_time || b.last_attempt || 0;
     return aTs - bTs;
   });
 
-  // Define columns in the required order
+  // Define columns for agent history
   const COLS = [
-    { key: 'called_time', label: 'Called Time' },
-    { key: 'answered_time', label: 'Answered Time' },
+    { key: 'called_time', label: 'Last Attempt' },
     { key: 'name', label: 'Name' },
     { key: 'ext', label: 'Extension' },
     { key: 'type', label: 'Type' },
@@ -1008,23 +1040,23 @@ function historyToHtml(history) {
       if (c.key === 'name') {
         val = `${h.first_name || ''} ${h.last_name || ''}`.trim();
       } else if (c.key === 'called_time') {
-        const timestamp = h.called_time;
+        const timestamp = h.called_time || h.last_attempt;
         if (timestamp) {
-          // Convert epoch timestamp to milliseconds if needed
-          const ms = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
-          val = isoToLocal(new Date(ms).toISOString());
-        }
-      } else if (c.key === 'answered_time') {
-        const timestamp = h.answered_time;
-        if (timestamp) {
-          // Convert epoch timestamp to milliseconds if needed
-          const ms = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
+          // Handle different timestamp formats
+          let ms;
+          if (timestamp > 1_000_000_000_000_000) {
+            ms = timestamp / 1000; // Microseconds
+          } else if (timestamp < 4102444800000) {
+            ms = timestamp * 1000; // Seconds
+          } else {
+            ms = timestamp; // Milliseconds
+          }
           val = isoToLocal(new Date(ms).toISOString());
         }
       } else if (c.key === 'connected') {
         val = h.connected === 'True' || h.connected === true ? 'Yes' : 'No';
       } else {
-        val = h[c.key] ?? '';
+        val = h[c.key] || '';
       }
       return `<td>${val}</td>`;
     }).join('');
@@ -1168,14 +1200,18 @@ function renderTableData(cols, data) {
       displayName = 'S.No';
     } else if (c === 'type_direction') {
       displayName = 'Type/Direction';
-    } else if (c === 'queue_campaign_name') {
-      displayName = 'Queue/Campaign Name';
+    } else if (c === 'queue_name') {
+      displayName = 'Queue Name';
+    } else if (c === 'campaign_name') {
+      displayName = 'Campaign Name';
     } else if (c === 'caller_id_number') {
       displayName = 'Caller ID Number';
-    } else if (c === 'caller_id_lead_name') {
-      displayName = 'Caller ID/Lead Name';
-    } else if (c === 'callee_id_lead_number') {
-      displayName = 'Callee ID/Lead Number';
+    } else if (c === 'caller_id_name') {
+      displayName = 'Caller ID Name';
+    } else if (c === 'callee_id_number') {
+      displayName = 'Callee ID Number';
+    } else if (c === 'callee_id_name') {
+      displayName = 'Callee ID Name';
     } else if (c === 'sub_disposition_1') {
       displayName = 'Sub-disposition 1';
     } else if (c === 'sub_disposition_2') {
@@ -1190,7 +1226,16 @@ function renderTableData(cols, data) {
   
   const tbody = `<tbody>${data
     .map(row => {
-      return '<tr>' + cols.map(c => {
+      // Determine row class based on call type/direction
+      let rowClass = '';
+      const typeDirection = row.type_direction || '';
+      if (typeDirection.toLowerCase().includes('outbound')) {
+        rowClass = 'row-outbound';
+      } else if (typeDirection.toLowerCase().includes('inbound')) {
+        rowClass = 'row-inbound';
+      }
+
+      return '<tr class="' + rowClass + '">' + cols.map(c => {
         let v = row[c];
         if (v == null) v = '';
 
@@ -1212,19 +1257,29 @@ function renderTableData(cols, data) {
 
         if (typeof v === 'object') {
           v = JSON.stringify(v);
-        } else if (typeof v === 'number') {
-          if (v > 1_000_000_000) {
-            // Likely epoch timestamp (s or ms)
-            const ms = v > 10_000_000_000 ? v : v * 1000;
-            v = isoToLocal(new Date(ms).toISOString());
-          } else {
+        } else if (typeof v === 'number' && !RAW_COLUMNS.has(c)) {
+          if (DURATION_COLUMNS.has(c)) {
             // Treat as duration in seconds
             v = secondsToHMS(v);
+          } else if (v > 1_000_000_000) {
+            // Handle different timestamp formats
+            let ms;
+            if (v > 1_000_000_000_000_000) {
+              // Microseconds (e.g., 1755191389441998) - divide by 1000 to get milliseconds
+              ms = v / 1000;
+            } else if (v < 4102444800000) {
+              // Seconds - multiply by 1000 to get milliseconds
+              ms = v * 1000;
+            } else {
+              // Already in milliseconds
+              ms = v;
+            }
+            v = isoToLocal(new Date(ms).toISOString());
           }
         } else if (typeof v === 'string' && /^\d+(\.\d+)?$/.test(v)) {
           const num = Number(v);
           if (!Number.isNaN(num) && num > 1_000_000_000) {
-            const ms = v.length > 10 ? num : num * 1000;
+            const ms = num < 4102444800000 ? num * 1000 : num;
             v = isoToLocal(new Date(ms).toISOString());
           }
         } else if (typeof v === 'string' && /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/.test(v)) {
@@ -1236,54 +1291,23 @@ function renderTableData(cols, data) {
             const src = `/api/recordings/${v}?account=${encodeURIComponent(tenantAccount)}`;
             const metaUrl = `/api/recordings/${v}/meta?account=${encodeURIComponent(tenantAccount)}`;
             return `<td style="text-align:center">
-              <div class="recording-container" data-recording-id="${id}" data-tenant="${tenantAccount}">
-                <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${id}" style="max-width:200px; display:none"></audio>
-                <div class="recording-loading" style="display:none">
-                  <span class="icon is-small"><i class="fas fa-spinner fa-spin"></i></span>
-                  Loading...
-                </div>
-                <div class="recording-error" style="display:none; color:red; font-size:12px">
-                  Recording unavailable
-                  <br><button class="button is-small is-warning retry-recording-btn" data-recording-id="${id}" data-src="${src}">
-                    <span class="icon is-small"><i class="fas fa-redo"></i></span>
-                    <span>Retry</span>
-                  </button>
-                </div>
-                <button class="button is-small is-primary play-recording-btn" data-recording-id="${id}" data-src="${src}">
-                  <span class="icon is-small"><i class="fas fa-play"></i></span>
-                  <span>Play</span>
-                </button>
-                <br><span class="rec-dur" id="dur_${id}"></span>
-              </div>
+              <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${id}" style="max-width:200px"></audio>
+              <br><span class="rec-dur" id="dur_${id}"></span>
             </td>`;
           }
           return '<td></td>';
         }
-
-        if (c === 'recording') {
-          const recordingId = v.replace(/[^\w]/g, '');
-          const src = `/api/recordings/${v}?account=${encodeURIComponent(tenantAccount)}`;
-          const metaUrl = `/api/recordings/${v}/meta?account=${encodeURIComponent(tenantAccount)}`;
-          return `<td style="text-align:center">
-            <div class="recording-container" data-recording-id="${recordingId}">
-              <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${recordingId}" style="max-width:200px; display:none"></audio>
-              <div class="recording-loading" style="display:none">
-                <span class="icon is-small"><i class="fas fa-spinner fa-spin"></i></span>
-                Loading...
-              </div>
-              <div class="recording-error" style="display:none; color: red;">
-                <span class="icon is-small"><i class="fas fa-exclamation-triangle"></i></span>
-                <span class="error-message">Error loading</span>
-                <button class="button is-small is-text retry-btn" style="margin-left: 5px;">Retry</button>
-              </div>
-              <button class="button is-small is-primary play-btn">
-                <span class="icon is-small"><i class="fas fa-play"></i></span>
-                <span>Play</span>
-              </button>
-              <br><span class="rec-dur" id="dur_${recordingId}"></span>
-            </div>
-          </td>`;
+        
+        // Handle queue history column
+        if (c === 'queue_history') {
+          return `<td style="text-align: center;">${formatQueueHistory(row)}</td>`;
         }
+        
+        // Handle agent history column
+        if (c === 'agent_history') {
+          return `<td style="text-align: center;">${formatAgentHistory(row)}</td>`;
+        }
+        
         return `<td>${v}</td>`;
       }).join('') + '</tr>';
     }).join('')}</tbody>`;
@@ -1294,138 +1318,33 @@ function renderTableData(cols, data) {
 }
 
 function setupRecordingElements() {
-  // Remove any existing listeners to prevent duplicates
-  document.removeEventListener('click', handleRecordingClick);
-  
-  // Add delegated event listener for recording controls
-  document.addEventListener('click', handleRecordingClick);
+  // Call the new duration fetching logic
+  afterRowsRendered();
 }
 
-async function handleRecordingClick(e) {
-  const playBtn = e.target.closest('.play-recording-btn');
-  const retryBtn = e.target.closest('.retry-recording-btn');
-  
-  if (playBtn) {
-    await handlePlayRecording(playBtn);
-  } else if (retryBtn) {
-    await handleRetryRecording(retryBtn);
-  }
-}
-
-async function handlePlayRecording(btn) {
-  const recordingId = btn.dataset.recordingId;
-  const src = btn.dataset.src;
-  const container = btn.closest('.recording-container');
-  const audio = container.querySelector('.recording-audio');
-  const loading = container.querySelector('.recording-loading');
-  const error = container.querySelector('.recording-error');
-  
-  // Hide error state
-  error.style.display = 'none';
-  
-  // Show loading state
-  loading.style.display = 'block';
-  btn.style.display = 'none';
-  
-  try {
-    // Test if recording is accessible
-    const testResponse = await fetch(src, { method: 'HEAD' });
-    
-    if (!testResponse.ok) {
-      throw new Error(`Recording not available (${testResponse.status})`);
+// Called after rows are fully appended for the current render
+function afterRowsRendered() {
+  // Re-run duration worker setup for new rows
+  const audioEls = Array.from(table.querySelectorAll('.recording-audio[data-meta]'));
+  const MAX_CONCURRENT = 5;
+  let idx = 0;
+  async function worker() {
+    while (idx < audioEls.length) {
+      const el = audioEls[idx++];
+      const spanId = 'dur_' + el.dataset.id;
+      const span = document.getElementById(spanId);
+      if (!span || span.textContent) continue;
+      try {
+        const resp = await axios.get(el.dataset.meta);
+        const dur = resp.data?.duration;
+        
+        if (typeof dur === 'number') {
+          span.textContent = ` Time: ${secondsToHMS(Math.round(dur))}`;
+        }
+      } catch {}
     }
-    
-    // Hide loading, show audio controls
-    loading.style.display = 'none';
-    audio.style.display = 'block';
-    
-    // Setup audio event handlers
-    setupAudioElement(audio, btn);
-    
-    // Auto-play the recording
-    audio.load();
-    await audio.play();
-    
-    // Update button to show stop functionality
-    updateButtonToStop(btn);
-    
-  } catch (err) {
-    console.error('Recording playback error:', err);
-    showRecordingError(container, btn, audio, err.message);
   }
-}
-
-async function handleRetryRecording(retryBtn) {
-  const playBtn = retryBtn.closest('.recording-container').querySelector('.play-recording-btn');
-  await handlePlayRecording(playBtn);
-}
-
-function setupAudioElement(audioEl, btn) {
-  const container = btn.closest('.recording-container');
-  
-  audioEl.addEventListener('ended', () => {
-    resetRecordingButton(btn, audioEl);
-  });
-  
-  audioEl.addEventListener('error', (e) => {
-    console.error(`Audio error for ${audioEl.dataset.id}:`, e);
-    showRecordingError(container, btn, audioEl, 'Playback failed');
-  });
-  
-  audioEl.addEventListener('pause', () => {
-    if (audioEl.currentTime === 0) {
-      resetRecordingButton(btn, audioEl);
-    }
-  });
-}
-
-function updateButtonToStop(btn) {
-  btn.innerHTML = `
-    <span class="icon is-small"><i class="fas fa-stop"></i></span>
-    <span>Stop</span>
-  `;
-  btn.classList.remove('is-primary');
-  btn.classList.add('is-danger');
-  btn.style.display = 'block';
-  
-  // Update click behavior to stop playback
-  btn.onclick = (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const container = btn.closest('.recording-container');
-    const audio = container.querySelector('.recording-audio');
-    audio.pause();
-    audio.currentTime = 0;
-    resetRecordingButton(btn, audio);
-  };
-}
-
-function resetRecordingButton(btn, audio) {
-  btn.innerHTML = `
-    <span class="icon is-small"><i class="fas fa-play"></i></span>
-    <span>Play</span>
-  `;
-  btn.classList.remove('is-danger');
-  btn.classList.add('is-primary');
-  audio.style.display = 'none';
-  
-  // Reset click handler
-  btn.onclick = null;
-}
-
-function showRecordingError(container, btn, audio, message) {
-  const loading = container.querySelector('.recording-loading');
-  const error = container.querySelector('.recording-error');
-  
-  loading.style.display = 'none';
-  audio.style.display = 'none';
-  btn.style.display = 'none';
-  error.style.display = 'block';
-  
-  const errorText = error.querySelector('div') || error;
-  if (errorText !== error) {
-    errorText.textContent = message;
-  }
+  Array.from({ length: Math.min(MAX_CONCURRENT, audioEls.length) }).forEach(worker);
 }
 
 function renderCurrentPage() {
@@ -1483,11 +1402,13 @@ function renderTableDataChunked(records, globalStartIdx = 0) {
     cols = [
       's_no',
       'type_direction',
-      'call_id',
-      'queue_campaign_name',
+      'queue_name',
+      'campaign_name',
       'called_time',
       'caller_id_number',
-      'caller_id_lead_name',
+      'caller_id_name',
+      'callee_id_number',
+      'callee_id_name',
       'answered_time',
       'hangup_time',
       'wait_duration',
@@ -1496,7 +1417,6 @@ function renderTableDataChunked(records, globalStartIdx = 0) {
       'sub_disposition_1',
       'sub_disposition_2',
       'follow_up_notes',
-      'callee_id_lead_number',
       'status',
       'campaign_type',
       'agent_history',
@@ -1504,7 +1424,8 @@ function renderTableDataChunked(records, globalStartIdx = 0) {
       'recording',
       'agent_name',
       'extension',
-      'country'
+      'country',
+      'call_id'
     ];
   } else {
     const originalCols = Object.keys(records[0] || {});
@@ -1517,14 +1438,18 @@ function renderTableDataChunked(records, globalStartIdx = 0) {
       displayName = 'S.No';
     } else if (c === 'type_direction') {
       displayName = 'Type/Direction';
-    } else if (c === 'queue_campaign_name') {
-      displayName = 'Queue/Campaign Name';
+    } else if (c === 'queue_name') {
+      displayName = 'Queue Name';
+    } else if (c === 'campaign_name') {
+      displayName = 'Campaign Name';
     } else if (c === 'caller_id_number') {
       displayName = 'Caller ID Number';
-    } else if (c === 'caller_id_lead_name') {
-      displayName = 'Caller ID/Lead Name';
-    } else if (c === 'callee_id_lead_number') {
-      displayName = 'Callee ID/Lead Number';
+    } else if (c === 'caller_id_name') {
+      displayName = 'Caller ID Name';
+    } else if (c === 'callee_id_number') {
+      displayName = 'Callee ID Number';
+    } else if (c === 'callee_id_name') {
+      displayName = 'Callee ID Name';
     } else if (c === 'sub_disposition_1') {
       displayName = 'Sub-disposition 1';
     } else if (c === 'sub_disposition_2') {
@@ -1561,6 +1486,15 @@ function renderRowsHtml(rows, startSerial = 1, cols) {
   let serial = startSerial;
   return rows
     .map(rec => {
+      // Determine row class based on call type/direction
+      let rowClass = '';
+      const typeDirection = rec.type_direction || '';
+      if (typeDirection.toLowerCase().includes('outbound')) {
+        rowClass = 'row-outbound';
+      } else if (typeDirection.toLowerCase().includes('inbound')) {
+        rowClass = 'row-inbound';
+      }
+
       const tds = cols.map(c => {
         if (c === 's_no') return `<td style="text-align: center; font-weight: bold; background-color: #f8f9fa;">${serial}</td>`;
         let v = rec[c];
@@ -1571,26 +1505,37 @@ function renderRowsHtml(rows, startSerial = 1, cols) {
           return `<td style="text-align: center; font-weight: bold; background-color: #f8f9fa;">${v}</td>`;
         }
 
-        // Skip any transformation for specific columns (caller/callee IDs)
+        // Skip any transformation for specific columns (caller/callee IDs) –
+        // we define RAW_COLUMNS outside the loop for efficiency.
         if (RAW_COLUMNS.has(c.toLowerCase())) {
           return `<td>${v}</td>`;
         }
 
         if (typeof v === 'object') {
           v = JSON.stringify(v);
-        } else if (typeof v === 'number') {
-          if (v > 1_000_000_000) {
-            // Likely epoch timestamp (s or ms)
-            const ms = v > 10_000_000_000 ? v : v * 1000;
-            v = isoToLocal(new Date(ms).toISOString());
-          } else {
+        } else if (typeof v === 'number' && !RAW_COLUMNS.has(c)) {
+          if (DURATION_COLUMNS.has(c)) {
             // Treat as duration in seconds
-            v = secondsToHMS(v);
+            v = secondsToHMS(Math.round(v));
+          } else if (v > 1_000_000_000) {
+            // Handle different timestamp formats
+            let ms;
+            if (v > 1_000_000_000_000_000) {
+              // Microseconds (e.g., 1755191389441998) - divide by 1000 to get milliseconds
+              ms = v / 1000;
+            } else if (v < 4102444800000) {
+              // Seconds - multiply by 1000 to get milliseconds
+              ms = v * 1000;
+            } else {
+              // Already in milliseconds
+              ms = v;
+            }
+            v = isoToLocal(new Date(ms).toISOString());
           }
         } else if (typeof v === 'string' && /^\d+(\.\d+)?$/.test(v)) {
           const num = Number(v);
           if (!Number.isNaN(num) && num > 1_000_000_000) {
-            const ms = v.length > 10 ? num : num * 1000;
+            const ms = num < 4102444800000 ? num * 1000 : num;
             v = isoToLocal(new Date(ms).toISOString());
           }
         } else if (typeof v === 'string' && /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/.test(v)) {
@@ -1602,58 +1547,27 @@ function renderRowsHtml(rows, startSerial = 1, cols) {
             const src = `/api/recordings/${v}?account=${encodeURIComponent(tenantAccount)}`;
             const metaUrl = `/api/recordings/${v}/meta?account=${encodeURIComponent(tenantAccount)}`;
             return `<td style="text-align:center">
-              <div class="recording-container" data-recording-id="${id}" data-tenant="${tenantAccount}">
-                <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${id}" style="max-width:200px; display:none"></audio>
-                <div class="recording-loading" style="display:none">
-                  <span class="icon is-small"><i class="fas fa-spinner fa-spin"></i></span>
-                  Loading...
-                </div>
-                <div class="recording-error" style="display:none; color:red; font-size:12px">
-                  Recording unavailable
-                  <br><button class="button is-small is-warning retry-recording-btn" data-recording-id="${id}" data-src="${src}">
-                    <span class="icon is-small"><i class="fas fa-redo"></i></span>
-                    <span>Retry</span>
-                  </button>
-                </div>
-                <button class="button is-small is-primary play-recording-btn" data-recording-id="${id}" data-src="${src}">
-                  <span class="icon is-small"><i class="fas fa-play"></i></span>
-                  <span>Play</span>
-                </button>
-                <br><span class="rec-dur" id="dur_${id}"></span>
-              </div>
+              <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${id}" style="max-width:200px"></audio>
+              <br><span class="rec-dur" id="dur_${id}"></span>
             </td>`;
           }
           return '<td></td>';
         }
-
-        if (c === 'recording') {
-          const recordingId = v.replace(/[^\w]/g, '');
-          const src = `/api/recordings/${v}?account=${encodeURIComponent(tenantAccount)}`;
-          const metaUrl = `/api/recordings/${v}/meta?account=${encodeURIComponent(tenantAccount)}`;
-          return `<td style="text-align:center">
-            <div class="recording-container" data-recording-id="${recordingId}">
-              <audio class="recording-audio" controls preload="none" src="${src}" data-meta="${metaUrl}" data-id="${recordingId}" style="max-width:200px; display:none"></audio>
-              <div class="recording-loading" style="display:none">
-                <span class="icon is-small"><i class="fas fa-spinner fa-spin"></i></span>
-                Loading...
-              </div>
-              <div class="recording-error" style="display:none; color: red;">
-                <span class="icon is-small"><i class="fas fa-exclamation-triangle"></i></span>
-                <span class="error-message">Error loading</span>
-                <button class="button is-small is-text retry-btn" style="margin-left: 5px;">Retry</button>
-              </div>
-              <button class="button is-small is-primary play-btn">
-                <span class="icon is-small"><i class="fas fa-play"></i></span>
-                <span>Play</span>
-              </button>
-              <br><span class="rec-dur" id="dur_${recordingId}"></span>
-            </div>
-          </td>`;
+        
+        // Handle queue history column
+        if (c === 'queue_history') {
+          return `<td style="text-align: center;">${formatQueueHistory(rec)}</td>`;
         }
+        
+        // Handle agent history column
+        if (c === 'agent_history') {
+          return `<td style="text-align: center;">${formatAgentHistory(rec)}</td>`;
+        }
+        
         return `<td>${v}</td>`;
-      });
+      }).join('');
       serial += 1;
-      return `<tr>${tds.join('')}</tr>`;
+      return `<tr class="${rowClass}">${tds.join('')}</tr>`;
     }).join('');
 }
 
